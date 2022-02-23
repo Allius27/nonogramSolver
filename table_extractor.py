@@ -12,17 +12,43 @@ BLUR_KERNEL_SIZE = (17, 17)
 STD_DEV_X_DIRECTION = 0
 STD_DEV_Y_DIRECTION = 0
 
+class Rect:
+    def __init__(self, x1, y1, x2, y2):
+        self.x1 = x1
+        self.y1 = y1
+        self.x2 = x2
+        self.y2 = y2
 
-def recognize(image, minX, maxX):
-    if minX - 5 >= 0: minX -= 5
-    if maxX + 5 >= image.shape[1]: maxX -= 5
+def showImage(name, image):
+    # image = cv2.resize(image, (0,0), fx=0.5, fy=0.5)
+    cv2.imshow(name, image)
+    cv2.waitKey(0)
 
-    roi = image[0:image.shape[0], minX:maxX]
+def recognize(image, rect, transpose):
+
+    roiRect = Rect(rect.x1, rect.y1, rect.x2, rect.y2)
+    if transpose:
+        roiRect.x1 = rect.y1
+        roiRect.y1 = rect.x1
+        roiRect.x2 = rect.y2
+        roiRect.y2 = rect.x2
+
+    # expand for better recognition
+    if roiRect.x1 - 5 >= 0: roiRect.x1 -= 5
+    if roiRect.x2 + 5 <= image.shape[1]: roiRect.x2 += 5
+    if roiRect.y1 - 5 > 0: roiRect.y1 -= 5
+    if roiRect.y2 + 5 <= image.shape[0]: roiRect.y2 += 5
+
+    roi = image[roiRect.y1:roiRect.y2, roiRect.x1:roiRect.x2]
 
     return image_to_string( roi, config='--psm 7' ).replace("\n\f", "")
 
-def getDigits(header_cell) -> []:
-    thresholded = cv2.threshold(header_cell, 125, 255, cv2.THRESH_BINARY)[1]
+def getDigits(header_cell, transpose) -> []:
+    thresholdedOrig = cv2.threshold(header_cell, 125, 255, cv2.THRESH_BINARY)[1]
+
+    thresholded = thresholdedOrig
+    if transpose:
+        thresholded = cv2.transpose(thresholded)
 
     morphed = cv2.erode(thresholded, cv2.getStructuringElement(cv2.MORPH_RECT, (1, thresholded.shape[0] * 2)))
     morphed = cv2.bitwise_not(morphed)
@@ -38,12 +64,12 @@ def getDigits(header_cell) -> []:
         if line[0][i] == line[0][i - 1]:
             continue
         if isDigit:
-            digitsCoord.append([startPoint, i])
+            digitsCoord.append([int(startPoint), int(i)])
         startPoint = i
         isDigit = not isDigit
 
     if len(digitsCoord) == 1:
-        return recognize(thresholded, 0, thresholded.shape[1])
+        return recognize(thresholdedOrig, Rect(0, 0, thresholded.shape[1], thresholded.shape[0] ), transpose)
 
     digits = []
     isSkipAfterCouple = False
@@ -54,16 +80,19 @@ def getDigits(header_cell) -> []:
 
         # check last symbol
         if i == len(digitsCoord) - 1 :
-            digits.append( recognize(thresholded, digitsCoord[i][0], digitsCoord[i][1] ))
+            rect = Rect(digitsCoord[i][0], 0, digitsCoord[i][1], thresholded.shape[0])
+            digits.append(recognize(thresholdedOrig, rect, transpose))
             continue
 
         space = digitsCoord[i+1][0] - digitsCoord[i][1]
 
         if space < 10:
-            digits.append(recognize(thresholded, digitsCoord[i][0], digitsCoord[i+1][1]))
+            rect = Rect(digitsCoord[i][0], 0, digitsCoord[i+1][1], thresholded.shape[0])
+            digits.append(recognize(thresholdedOrig, rect, transpose))
             isSkipAfterCouple = True
         else:
-            digits.append(recognize(thresholded, digitsCoord[i][0], digitsCoord[i][1]))
+            rect = Rect(digitsCoord[i][0], 0, digitsCoord[i][1], thresholded.shape[0] )
+            digits.append(recognize(thresholdedOrig, rect, transpose))
 
     return digits
 
@@ -146,18 +175,14 @@ def extract_table(image):
     cell_height = table_bbox[3] / table_size
     for i in range(table_size):
         header_cell = image[table_bbox[1]+int(cell_height*i):table_bbox[1]+int(cell_height*(i+1)),play_bbox[0]:table_bbox[0]-10]
-        vertical_header.append(getDigits(header_cell))
+        vertical_header.append(getDigits(header_cell, False))
 
     # Get horizontal header
-    # TODO: make tesseract and multiline header friends
     horizontal_header = []
     cell_width = table_bbox[2] / table_size
     for i in range(table_size):
         header_cell = image[play_bbox[1]:table_bbox[1]-10,table_bbox[0]+int(cell_width*i):table_bbox[0]+int(cell_width*(i+1))]
-        horizontal_header.append(image_to_string(
-            cv2.threshold(header_cell, 125, 255, cv2.THRESH_BINARY)[1],
-            config='--psm 7'
-        ).strip())
+        horizontal_header.append(getDigits(header_cell, True))
 
     ### Get cells values
     rows_means = np.zeros((table_size, table_size))
