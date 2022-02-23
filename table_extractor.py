@@ -13,6 +13,61 @@ STD_DEV_X_DIRECTION = 0
 STD_DEV_Y_DIRECTION = 0
 
 
+def recognize(image, minX, maxX):
+    if minX - 5 >= 0: minX -= 5
+    if maxX + 5 >= image.shape[1]: maxX -= 5
+
+    roi = image[0:image.shape[0], minX:maxX]
+
+    return image_to_string( roi, config='--psm 7' ).replace("\n\f", "")
+
+def getDigits(header_cell) -> []:
+    thresholded = cv2.threshold(header_cell, 125, 255, cv2.THRESH_BINARY)[1]
+
+    morphed = cv2.erode(thresholded, cv2.getStructuringElement(cv2.MORPH_RECT, (1, thresholded.shape[0] * 2)))
+    morphed = cv2.bitwise_not(morphed)
+
+    line = morphed[0:1, 0:morphed.shape[1]]
+    nonZero = cv2.findNonZero(line)
+
+    startPoint = nonZero[0][0][0] + 1
+
+    digitsCoord = []
+    isDigit = True
+    for i in range(startPoint, line.shape[1]):
+        if line[0][i] == line[0][i - 1]:
+            continue
+        if isDigit:
+            digitsCoord.append([startPoint, i])
+        startPoint = i
+        isDigit = not isDigit
+
+    if len(digitsCoord) == 1:
+        return recognize(thresholded, 0, thresholded.shape[1])
+
+    digits = []
+    isSkipAfterCouple = False
+    for i in range(0, len(digitsCoord)):
+        if isSkipAfterCouple:
+            isSkipAfterCouple = False
+            continue
+
+        # check last symbol
+        if i == len(digitsCoord) - 1 :
+            digits.append( recognize(thresholded, digitsCoord[i][0], digitsCoord[i][1] ))
+            continue
+
+        space = digitsCoord[i+1][0] - digitsCoord[i][1]
+
+        if space < 10:
+            digits.append(recognize(thresholded, digitsCoord[i][0], digitsCoord[i+1][1]))
+            isSkipAfterCouple = True
+        else:
+            digits.append(recognize(thresholded, digitsCoord[i][0], digitsCoord[i][1]))
+
+    return digits
+
+
 def extract_table(image):
     ### Get table contours
     blurred = cv2.GaussianBlur(image, BLUR_KERNEL_SIZE, STD_DEV_X_DIRECTION, STD_DEV_Y_DIRECTION)
@@ -91,10 +146,8 @@ def extract_table(image):
     cell_height = table_bbox[3] / table_size
     for i in range(table_size):
         header_cell = image[table_bbox[1]+int(cell_height*i):table_bbox[1]+int(cell_height*(i+1)),play_bbox[0]:table_bbox[0]-10]
-        vertical_header.append(image_to_string(
-            cv2.threshold(header_cell, 125, 255, cv2.THRESH_BINARY)[1],
-            config='--psm 7'
-        ).strip())
+        vertical_header.append(getDigits(header_cell))
+
     # Get horizontal header
     # TODO: make tesseract and multiline header friends
     horizontal_header = []
