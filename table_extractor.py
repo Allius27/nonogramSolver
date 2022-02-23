@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from pytesseract import image_to_string
+import re
 
 
 MAX_COLOR_VAL = 255
@@ -41,7 +42,16 @@ def recognize(image, rect, transpose):
 
     roi = image[roiRect.y1:roiRect.y2, roiRect.x1:roiRect.x2]
 
-    return image_to_string( roi, config='--psm 7' ).replace("\n\f", "")
+    char = image_to_string(roi, config='--psm 7').replace("\n\f", "")
+
+    # check digits only
+    for ch in str(char):
+        if re.compile(r'[^0-9]').match(ch):
+            print ("Unable to process symbol ", ch)
+            showImage("error", roi)
+            exit(2)
+
+    return char
 
 def getDigits(header_cell, transpose) -> []:
     thresholdedOrig = cv2.threshold(header_cell, 200, 255, cv2.THRESH_BINARY)[1]
