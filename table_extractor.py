@@ -44,7 +44,7 @@ def recognize(image, rect, transpose):
     return image_to_string( roi, config='--psm 7' ).replace("\n\f", "")
 
 def getDigits(header_cell, transpose) -> []:
-    thresholdedOrig = cv2.threshold(header_cell, 125, 255, cv2.THRESH_BINARY)[1]
+    thresholdedOrig = cv2.threshold(header_cell, 200, 255, cv2.THRESH_BINARY)[1]
 
     thresholded = thresholdedOrig
     if transpose:
