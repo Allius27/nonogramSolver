@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from pytesseract import image_to_string
+from paddleocr import PaddleOCR
 import re
 
 
@@ -13,6 +13,9 @@ BLUR_KERNEL_SIZE = (17, 17)
 STD_DEV_X_DIRECTION = 0
 STD_DEV_Y_DIRECTION = 0
 
+ocr = PaddleOCR(use_angle_cls=True, lang='en') 
+
+
 class Rect:
     def __init__(self, x1, y1, x2, y2):
         self.x1 = x1
@@ -20,91 +23,71 @@ class Rect:
         self.x2 = x2
         self.y2 = y2
 
+        
 def showImage(name, image):
     # image = cv2.resize(image, (0,0), fx=0.5, fy=0.5)
     cv2.imshow(name, image)
     cv2.waitKey(0)
 
-def recognize(image, rect, transpose):
+    
+def parse_vertical_header(header_cell):
+    # TODO: проверить фейлкейс 28.jpg: девятку распознает как 6 на оригинале, как 9 на бинаризованном, однако, на бинаризованном хуже работает в других случаях
+    binarized = cv2.threshold(header_cell, 200, 255, cv2.THRESH_BINARY)[1]
+    contours, hierarchy = cv2.findContours(255-binarized, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
 
-    roiRect = Rect(rect.x1, rect.y1, rect.x2, rect.y2)
-    if transpose:
-        roiRect.x1 = rect.y1
-        roiRect.y1 = rect.x1
-        roiRect.x2 = rect.y2
-        roiRect.y2 = rect.x2
-
-    # expand for better recognition
-    if roiRect.x1 - 5 >= 0: roiRect.x1 -= 5
-    if roiRect.x2 + 5 <= image.shape[1]: roiRect.x2 += 5
-    if roiRect.y1 - 5 > 0: roiRect.y1 -= 5
-    if roiRect.y2 + 5 <= image.shape[0]: roiRect.y2 += 5
-
-    roi = image[roiRect.y1:roiRect.y2, roiRect.x1:roiRect.x2]
-
-    char = image_to_string(roi, config='--psm 7').replace("\n\f", "")
-
-    # check digits only
-    for ch in str(char):
-        if re.compile(r'[^0-9]').match(ch):
-            print ("Unable to process symbol ", ch)
-            showImage("error", roi)
-            exit(2)
-
-    return char
-
-def getDigits(header_cell, transpose) -> []:
-    thresholdedOrig = cv2.threshold(header_cell, 200, 255, cv2.THRESH_BINARY)[1]
-
-    thresholded = thresholdedOrig
-    if transpose:
-        thresholded = cv2.transpose(thresholded)
-
-    morphed = cv2.erode(thresholded, cv2.getStructuringElement(cv2.MORPH_RECT, (1, thresholded.shape[0] * 2)))
-    morphed = cv2.bitwise_not(morphed)
-
-    line = morphed[0:1, 0:morphed.shape[1]]
-    nonZero = cv2.findNonZero(line)
-
-    startPoint = nonZero[0][0][0] + 1
-
-    digitsCoord = []
-    isDigit = True
-    for i in range(startPoint, line.shape[1]):
-        if line[0][i] == line[0][i - 1]:
-            continue
-        if isDigit:
-            digitsCoord.append([int(startPoint), int(i)])
-        startPoint = i
-        isDigit = not isDigit
-
-    if len(digitsCoord) == 1:
-        return recognize(thresholdedOrig, Rect(0, 0, thresholded.shape[1], thresholded.shape[0] ), transpose)
-
-    digits = []
-    isSkipAfterCouple = False
-    for i in range(0, len(digitsCoord)):
-        if isSkipAfterCouple:
-            isSkipAfterCouple = False
-            continue
-
-        # check last symbol
-        if i == len(digitsCoord) - 1 :
-            rect = Rect(digitsCoord[i][0], 0, digitsCoord[i][1], thresholded.shape[0])
-            digits.append(recognize(thresholdedOrig, rect, transpose))
-            continue
-
-        space = digitsCoord[i+1][0] - digitsCoord[i][1]
-
-        if space < 10:
-            rect = Rect(digitsCoord[i][0], 0, digitsCoord[i+1][1], thresholded.shape[0])
-            digits.append(recognize(thresholdedOrig, rect, transpose))
-            isSkipAfterCouple = True
+    char_bboxes = []
+    for j, c in enumerate(contours):
+        if hierarchy[0][j][3] == -1:
+            char_bboxes.append(cv2.boundingRect(cv2.approxPolyDP(c, 3, True)))
+            
+    char_bboxes = sorted(char_bboxes, key=lambda x: x[0])
+    char_height = sum([x[3] for x in char_bboxes]) / len(char_bboxes)
+    
+    if len(char_bboxes) == 0:
+        return []
+    
+    result = []
+    #debug = []
+    current_x1 = 0
+    current_x2 = 0
+    for char_bbox in char_bboxes:
+        if abs(char_bbox[0] - current_x2) < char_height * 0.4:
+            current_x2 = char_bbox[0]+char_bbox[2]
         else:
-            rect = Rect(digitsCoord[i][0], 0, digitsCoord[i][1], thresholded.shape[0] )
-            digits.append(recognize(thresholdedOrig, rect, transpose))
+            if current_x2 > 0:
+                padded = cv2.copyMakeBorder(
+                    header_cell[:,max(current_x1-int(char_height*0.4), 0):min(current_x2+int(char_height*0.4), header_cell.shape[1]-1)],
+                    0, 0, 150, 150, cv2.BORDER_CONSTANT, value=240
+                )
+                ocred = ocr.ocr(padded, cls=True)
+                #debug.append(padded)
+                if len(ocred) > 0 and ocred[0][1][0].isnumeric():
+                    result.append(int(ocred[0][1][0]))
+            current_x1 = char_bbox[0]
+            current_x2 = char_bbox[0]+char_bbox[2]
+    padded = cv2.copyMakeBorder(
+        header_cell[:,max(current_x1-int(char_height*0.4), 0):min(current_x2+int(char_height*0.4), header_cell.shape[1]-1)],
+        0, 0, 150, 150, cv2.BORDER_CONSTANT, value=240
+    )
+    ocred = ocr.ocr(padded, cls=True)
+    #debug.append(padded)
+    if len(ocred) > 0 and ocred[0][1][0].isnumeric():
+        result.append(int(ocred[0][1][0]))
+    return result
 
-    return digits
+
+def parse_horizontal_header(header_cell):
+    # TODO: доделать на кейс большой таблицы (как вариант: построчный парсинг с использованием bbox, как в parse_vertical_header)
+    padded = cv2.copyMakeBorder(
+        header_cell,
+        0, 0, 150, 150, cv2.BORDER_CONSTANT, value=240
+    )
+    ocred = ocr.ocr(padded, cls=True)
+    result = []
+    for item in sorted(ocred, key=lambda x: x[0][0][1]):
+        if item[1][0].isnumeric():
+            result.append(int(item[1][0]))
+    return result
 
 
 def extract_table(image):
@@ -185,14 +168,14 @@ def extract_table(image):
     cell_height = table_bbox[3] / table_size
     for i in range(table_size):
         header_cell = image[table_bbox[1]+int(cell_height*i):table_bbox[1]+int(cell_height*(i+1)),play_bbox[0]:table_bbox[0]-10]
-        vertical_header.append(getDigits(header_cell, False))
+        vertical_header.append(parse_vertical_header(header_cell))
 
     # Get horizontal header
     horizontal_header = []
     cell_width = table_bbox[2] / table_size
     for i in range(table_size):
         header_cell = image[play_bbox[1]:table_bbox[1]-10,table_bbox[0]+int(cell_width*i):table_bbox[0]+int(cell_width*(i+1))]
-        horizontal_header.append(getDigits(header_cell, True))
+        horizontal_header.append(parse_horizontal_header(header_cell))
 
     ### Get cells values
     rows_means = np.zeros((table_size, table_size))
